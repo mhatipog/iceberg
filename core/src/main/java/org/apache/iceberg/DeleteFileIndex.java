@@ -53,6 +53,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.Sets;
 import org.apache.iceberg.types.Comparators;
 import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Type;
+import org.apache.iceberg.types.TypeUtil;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.ArrayUtil;
 import org.apache.iceberg.util.ContentFileUtil;
@@ -258,7 +259,7 @@ class DeleteFileIndex {
 
   @SuppressWarnings("checkstyle:CyclomaticComplexity")
   private static boolean canContainEqDeletesForFile(
-      DataFile dataFile, EqualityDeleteFile deleteFile) {
+      DataFile dataFile, EqualityDeleteFile deleteFile, Set<Integer> fieldsWithOptionalAncestor) {
     Map<Integer, ByteBuffer> dataLowers = dataFile.lowerBounds();
     Map<Integer, ByteBuffer> dataUppers = dataFile.upperBounds();
 
@@ -279,19 +280,32 @@ class DeleteFileIndex {
         continue;
       }
 
-      if (containsNull(dataNullCounts, field) && containsNull(deleteNullCounts, field)) {
+      boolean hasOptionalAncestor = fieldsWithOptionalAncestor.contains(field.fieldId());
+      boolean dataMayContainNull =
+          containsNull(
+              dataNullCounts, dataValueCounts, dataFile.recordCount(), field, hasOptionalAncestor);
+      boolean deleteMayContainNull =
+          containsNull(
+              deleteNullCounts,
+              deleteValueCounts,
+              deleteFile.wrapped().recordCount(),
+              field,
+              hasOptionalAncestor);
+
+      if (dataMayContainNull && deleteMayContainNull) {
         // the data has null values and null has been deleted, so the deletes must be applied
         continue;
       }
 
-      if (allNull(dataNullCounts, dataValueCounts, field) && allNonNull(deleteNullCounts, field)) {
+      if (!deleteMayContainNull
+          && allNull(dataNullCounts, dataValueCounts, field, hasOptionalAncestor)) {
         // the data file contains only null values for this field, but there are no deletes for null
         // values
         return false;
       }
 
-      if (allNull(deleteNullCounts, deleteValueCounts, field)
-          && allNonNull(dataNullCounts, field)) {
+      if (!dataMayContainNull
+          && allNull(deleteNullCounts, deleteValueCounts, field, hasOptionalAncestor)) {
         // the delete file removes only null rows with null for this field, but there are no data
         // rows with null
         return false;
@@ -343,26 +357,12 @@ class DeleteFileIndex {
     return true;
   }
 
-  private static boolean allNonNull(Map<Integer, Long> nullValueCounts, Types.NestedField field) {
-    if (field.isRequired()) {
-      return true;
-    }
-
-    if (nullValueCounts == null) {
-      return false;
-    }
-
-    Long nullValueCount = nullValueCounts.get(field.fieldId());
-    if (nullValueCount == null) {
-      return false;
-    }
-
-    return nullValueCount <= 0;
-  }
-
   private static boolean allNull(
-      Map<Integer, Long> nullValueCounts, Map<Integer, Long> valueCounts, Types.NestedField field) {
-    if (field.isRequired()) {
+      Map<Integer, Long> nullValueCounts,
+      Map<Integer, Long> valueCounts,
+      Types.NestedField field,
+      boolean hasOptionalAncestor) {
+    if (field.isRequired() && !hasOptionalAncestor) {
       return false;
     }
 
@@ -379,8 +379,20 @@ class DeleteFileIndex {
     return nullValueCount.equals(valueCount);
   }
 
-  private static boolean containsNull(Map<Integer, Long> nullValueCounts, Types.NestedField field) {
-    if (field.isRequired()) {
+  private static boolean containsNull(
+      Map<Integer, Long> nullValueCounts,
+      Map<Integer, Long> valueCounts,
+      long recordCount,
+      Types.NestedField field,
+      boolean hasOptionalAncestor) {
+    if (hasOptionalAncestor) {
+      // A child can be null when a parent is null, including a required child.
+      // Legacy ORC metrics can omit those rows from both value and null counts.
+      Long valueCount = valueCounts != null ? valueCounts.get(field.fieldId()) : null;
+      if (valueCount == null || valueCount != recordCount) {
+        return true;
+      }
+    } else if (field.isRequired()) {
       return false;
     }
 
@@ -548,12 +560,34 @@ class DeleteFileIndex {
       }
     }
 
+    private static Set<Integer> fieldsWithOptionalAncestor(Collection<Schema> schemas) {
+      Set<Integer> fields = Sets.newHashSet();
+      for (Schema schema : schemas) {
+        Map<Integer, Integer> parents = TypeUtil.indexParents(schema.asStruct());
+        for (Map.Entry<Integer, Integer> entry : parents.entrySet()) {
+          Integer parentId = entry.getValue();
+          while (parentId != null) {
+            if (schema.findField(parentId).isOptional()) {
+              fields.add(entry.getKey());
+              break;
+            }
+
+            parentId = parents.get(parentId);
+          }
+        }
+      }
+
+      return fields;
+    }
+
     DeleteFileIndex build() {
-      Map<Integer, Types.NestedField> fieldsById = Schema.indexFields(schemas());
+      Collection<Schema> schemas = schemas();
+      Map<Integer, Types.NestedField> fieldsById = Schema.indexFields(schemas);
+      Set<Integer> fieldsWithOptionalAncestor = fieldsWithOptionalAncestor(schemas);
       Function<Integer, Types.NestedField> fieldLookup = fieldsById::get;
       Iterable<DeleteFile> files = deleteFiles != null ? filterDeleteFiles() : loadDeleteFiles();
 
-      EqualityDeletes globalDeletes = new EqualityDeletes(fieldLookup);
+      EqualityDeletes globalDeletes = new EqualityDeletes(fieldLookup, fieldsWithOptionalAncestor);
       PartitionMap<EqualityDeletes> eqDeletesByPartition = PartitionMap.create(specsById);
       PartitionMap<PositionDeletes> posDeletesByPartition = PartitionMap.create(specsById);
       Map<String, PositionDeletes> posDeletesByPath = Maps.newHashMap();
@@ -569,7 +603,7 @@ class DeleteFileIndex {
             }
             break;
           case EQUALITY_DELETES:
-            add(globalDeletes, eqDeletesByPartition, file, fieldLookup);
+            add(globalDeletes, eqDeletesByPartition, file, fieldLookup, fieldsWithOptionalAncestor);
             break;
           default:
             throw new UnsupportedOperationException("Unsupported content: " + file.content());
@@ -618,7 +652,8 @@ class DeleteFileIndex {
         EqualityDeletes globalDeletes,
         PartitionMap<EqualityDeletes> deletesByPartition,
         DeleteFile file,
-        Function<Integer, Types.NestedField> fieldLookup) {
+        Function<Integer, Types.NestedField> fieldLookup,
+        Set<Integer> fieldsWithOptionalAncestor) {
       PartitionSpec spec = specsById.get(file.specId());
 
       EqualityDeletes deletes;
@@ -627,7 +662,8 @@ class DeleteFileIndex {
       } else {
         int specId = spec.specId();
         StructLike partition = file.partition();
-        Supplier<EqualityDeletes> initEqDeletes = () -> new EqualityDeletes(fieldLookup);
+        Supplier<EqualityDeletes> initEqDeletes =
+            () -> new EqualityDeletes(fieldLookup, fieldsWithOptionalAncestor);
         deletes = deletesByPartition.computeIfAbsent(specId, partition, initEqDeletes);
       }
 
@@ -809,6 +845,7 @@ class DeleteFileIndex {
     private static final EqualityDeleteFile[] EMPTY_EQUALITY_DELETES = new EqualityDeleteFile[0];
 
     private final Function<Integer, Types.NestedField> fieldLookup;
+    private final Set<Integer> fieldsWithOptionalAncestor;
 
     // indexed state
     private long[] seqs = null;
@@ -817,8 +854,10 @@ class DeleteFileIndex {
     // a buffer that is used to hold files before indexing
     private volatile List<EqualityDeleteFile> buffer = Lists.newArrayList();
 
-    EqualityDeletes(Function<Integer, Types.NestedField> fieldLookup) {
+    EqualityDeletes(
+        Function<Integer, Types.NestedField> fieldLookup, Set<Integer> fieldsWithOptionalAncestor) {
       this.fieldLookup = fieldLookup;
+      this.fieldsWithOptionalAncestor = fieldsWithOptionalAncestor;
     }
 
     public void add(DeleteFile file) {
@@ -839,7 +878,7 @@ class DeleteFileIndex {
 
       for (int index = start; index < files.length; index++) {
         EqualityDeleteFile file = files[index];
-        if (canContainEqDeletesForFile(dataFile, file)) {
+        if (canContainEqDeletesForFile(dataFile, file, fieldsWithOptionalAncestor)) {
           matchingFiles.add(file.wrapped());
         }
       }

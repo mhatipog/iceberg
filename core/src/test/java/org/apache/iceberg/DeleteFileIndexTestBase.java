@@ -168,6 +168,65 @@ public abstract class DeleteFileIndexTestBase<
   protected abstract ScanT newScan(Table table);
 
   @TestTemplate
+  public void testEqualityDeletesForFieldsUnderOptionalStruct() {
+    Schema schema =
+        new Schema(
+            Types.NestedField.optional(
+                1,
+                "parent",
+                Types.StructType.of(
+                    Types.NestedField.required(2, "required_child", Types.IntegerType.get()),
+                    Types.NestedField.optional(3, "optional_child", Types.IntegerType.get()))));
+    PartitionSpec spec = PartitionSpec.builderFor(schema).build();
+
+    for (int id : List.of(2, 3)) {
+      DeleteFile deletes =
+          withDataSequenceNumber(
+              2,
+              FileMetadata.deleteFileBuilder(spec)
+                  .ofEqualityDeletes(id)
+                  .withPath("/path/to/null-delete.parquet")
+                  .withFileSizeInBytes(10)
+                  .withMetrics(new Metrics(1L, null, Map.of(id, 1L), Map.of(id, 1L), null))
+                  .build());
+
+      DeleteFileIndex index =
+          DeleteFileIndex.builderFor(List.of(deletes))
+              .specsById(Map.of(spec.specId(), spec))
+              .schemasById(Map.of(schema.schemaId(), schema))
+              .build();
+
+      // The first row has a null parent, and the second has a present, non-null child.
+      // Legacy ORC metrics counted only the present child and reported zero nulls.
+      DataFile legacy =
+          DataFiles.builder(spec)
+              .withPath("/path/to/legacy.orc")
+              .withFileSizeInBytes(10)
+              .withMetrics(new Metrics(2L, null, Map.of(id, 1L), Map.of(id, 0L), null))
+              .build();
+      assertThat(index.forDataFile(0, legacy)).containsExactly(deletes);
+
+      // Corrected metrics count the missing parent as a null child.
+      DataFile corrected =
+          DataFiles.builder(spec)
+              .withPath("/path/to/corrected.orc")
+              .withFileSizeInBytes(10)
+              .withMetrics(new Metrics(2L, null, Map.of(id, 2L), Map.of(id, 1L), null))
+              .build();
+      assertThat(index.forDataFile(0, corrected)).containsExactly(deletes);
+
+      // Complete metrics still allow pruning when neither data row has a null child.
+      DataFile healthy =
+          DataFiles.builder(spec)
+              .withPath("/path/to/healthy.orc")
+              .withFileSizeInBytes(10)
+              .withMetrics(new Metrics(2L, null, Map.of(id, 2L), Map.of(id, 0L), null))
+              .build();
+      assertThat(index.forDataFile(0, healthy)).isEmpty();
+    }
+  }
+
+  @TestTemplate
   public void testMinSequenceNumberFilteringForFiles() {
     PartitionSpec partSpec = PartitionSpec.unpartitioned();
 
@@ -681,7 +740,7 @@ public abstract class DeleteFileIndexTestBase<
     DeleteFile file4 = withDataSequenceNumber(4, partitionedEqDeletes(SPEC, FILE_A.partition()));
 
     Function<Integer, Types.NestedField> fieldLookup = SCHEMA::findField;
-    EqualityDeletes group = new EqualityDeletes(fieldLookup);
+    EqualityDeletes group = new EqualityDeletes(fieldLookup, Collections.emptySet());
     group.add(file4);
     group.add(file2);
     group.add(file1);
