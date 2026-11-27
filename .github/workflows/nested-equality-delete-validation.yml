@@ -1,0 +1,108 @@
+name: Nested equality delete regression validation
+on:
+  push:
+    branches:
+      - validation/equality-deletes-null-struct-ancestors
+  pull_request:
+    branches:
+      - fix/equality-deletes-null-struct-ancestors
+    paths:
+      - '.github/workflows/nested-equality-delete-validation.yml'
+permissions:
+  contents: read
+jobs:
+  red-green:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880
+        with:
+          distribution: zulu
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c
+        with:
+          cache-read-only: true
+      - name: Upstream implementation must fail new regression assertions
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=core/src/main/java/org/apache/iceberg/DeleteFileIndex.java
+          tests=core/src/test/java/org/apache/iceberg/DeleteFileIndexTestBase.java
+          git show 6cf1f6e4e6cfa6210f0017466283be6d01acab68:"$source" > "$source"
+          sed -i 's/new EqualityDeletes(fieldLookup, Collections.emptySet())/new EqualityDeletes(fieldLookup)/' "$tests"
+          set +e
+          ./gradlew :iceberg-core:test -DsparkVersions= -DflinkVersions= -DkafkaVersions= --tests '*TestLocalDeleteFileIndex.testEqualityDeletesForFieldsUnderOptionalStruct' --tests '*TestLocalDeleteFileIndex.testEqualityDeletesWithDisjointBoundsUnderOptionalStruct'
+          rc=$?
+          set -e
+          test "$rc" -ne 0
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          expected = {'testEqualityDeletesForFieldsUnderOptionalStruct', 'testEqualityDeletesWithDisjointBoundsUnderOptionalStruct'}
+          failed = set()
+          for f in Path('core/build/test-results/test').glob('TEST-*.xml'):
+              for case in ET.parse(f).iter('testcase'):
+                  failure = case.find('failure')
+                  if failure is not None and 'AssertionError' in failure.attrib.get('type', ''):
+                      for name in expected:
+                          if name in case.attrib.get('name', ''):
+                              failed.add(name)
+          print('Assertion failures in upstream implementation:', sorted(failed))
+          assert failed == expected, failed
+          PY
+      - name: Preserve upstream core regression reports
+        if: always()
+        run: |
+          mkdir -p validation-results
+          cp -r core/build/test-results/test validation-results/red-core || true
+      - name: Upstream real-file regression
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          source=core/src/main/java/org/apache/iceberg/DeleteFileIndex.java
+          tests=core/src/test/java/org/apache/iceberg/DeleteFileIndexTestBase.java
+          git show 6cf1f6e4e6cfa6210f0017466283be6d01acab68:"$source" > "$source"
+          sed -i 's/new EqualityDeletes(fieldLookup, Collections.emptySet())/new EqualityDeletes(fieldLookup)/' "$tests"
+          set +e
+          ./gradlew :iceberg-data:test -DsparkVersions= -DflinkVersions= -DkafkaVersions= --tests '*TestGenericReaderDeletes.testNestedEqualityDeleteWithNullAncestor'
+          rc=$?
+          set -e
+          mkdir -p validation-results
+          cp -r data/build/test-results/test validation-results/red-data || true
+          test "$rc" -ne 0
+          python3 - <<'PY'
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          cases = [
+              c for f in Path('validation-results/red-data').glob('TEST-*.xml')
+              for c in ET.parse(f).iter('testcase')
+          ]
+          print([(c.attrib.get('name'), c.find('failure') is not None) for c in cases])
+          assert any(c.find('failure') is not None and
+                     'AssertionError' in c.find('failure').attrib.get('type', '')
+                     for c in cases), 'No assertion failure reproduced'
+          PY
+      - name: Restore candidate and run complete index test class
+        if: always()
+        run: |
+          git restore core/src/main/java/org/apache/iceberg/DeleteFileIndex.java core/src/test/java/org/apache/iceberg/DeleteFileIndexTestBase.java
+          ./gradlew :iceberg-core:test -DsparkVersions= -DflinkVersions= -DkafkaVersions= --tests '*TestLocalDeleteFileIndex'
+      - name: Candidate real-file tests
+        if: always()
+        run: ./gradlew :iceberg-data:test -DsparkVersions= -DflinkVersions= -DkafkaVersions= --tests '*TestGenericReaderDeletes'
+      - name: Formatting
+        if: always()
+        run: ./gradlew :iceberg-core:spotlessCheck :iceberg-data:spotlessCheck -DsparkVersions= -DflinkVersions= -DkafkaVersions=
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: nested-equality-delete-test-results
+          path: |
+            validation-results/
+            core/build/test-results/test/
+            data/build/test-results/test/
