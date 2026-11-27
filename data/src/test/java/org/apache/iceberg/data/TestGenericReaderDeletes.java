@@ -22,6 +22,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.File;
 import java.io.IOException;
+import org.apache.iceberg.FileScanTask;
 import org.apache.iceberg.Files;
 import org.apache.iceberg.ParameterizedTestExtension;
 import org.apache.iceberg.PartitionSpec;
@@ -66,7 +67,7 @@ public class TestGenericReaderDeletes extends DeleteReadTests {
   }
 
   @TestTemplate
-  public void testNestedEqualityDeleteWithNullAncestor() throws IOException {
+  public void testPlansNestedEqualityDeleteWithNullAncestor() throws IOException {
     Schema schema =
         new Schema(
             Types.NestedField.required(1, "id", Types.IntegerType.get()),
@@ -88,12 +89,13 @@ public class TestGenericReaderDeletes extends DeleteReadTests {
             .build();
 
     GenericRecord data = GenericRecord.create(nested.schema());
-    GenericRecord child =
-        GenericRecord.create(nested.schema().findType("parent").asStructType());
+    GenericRecord child = GenericRecord.create(nested.schema().findType("parent").asStructType());
     DataWriter<Record> dataWriter =
         factory.newDataWriter(
-            nested.encryption().encrypt(
-                Files.localOutput(temp.resolve(format.addExtension("nested-data")).toFile())),
+            nested
+                .encryption()
+                .encrypt(
+                    Files.localOutput(temp.resolve(format.addExtension("nested-data")).toFile())),
             nested.spec(),
             null);
     try (dataWriter) {
@@ -106,8 +108,10 @@ public class TestGenericReaderDeletes extends DeleteReadTests {
     GenericRecord delete = GenericRecord.create(deleteSchema);
     EqualityDeleteWriter<Record> deleteWriter =
         factory.newEqualityDeleteWriter(
-            nested.encryption().encrypt(
-                Files.localOutput(temp.resolve(format.addExtension("nested-delete")).toFile())),
+            nested
+                .encryption()
+                .encrypt(
+                    Files.localOutput(temp.resolve(format.addExtension("nested-delete")).toFile())),
             nested.spec(),
             null);
     try (deleteWriter) {
@@ -117,9 +121,13 @@ public class TestGenericReaderDeletes extends DeleteReadTests {
 
     nested.newRowDelta().addDeletes(deleteWriter.toDeleteFile()).commit();
 
-    // The non-null child values have disjoint bounds, but the null parent must match.
-    try (CloseableIterable<Record> rows = IcebergGenerics.read(nested).select("id").build()) {
-      assertThat(Iterables.transform(rows, row -> row.getField("id"))).containsExactly(2);
+    // Disjoint non-null bounds do not rule out a match through the null parent.
+    try (CloseableIterable<FileScanTask> tasks = nested.newScan().planFiles()) {
+      assertThat(tasks).hasSize(1);
+      FileScanTask task = Iterables.getOnlyElement(tasks);
+      assertThat(task.deletes())
+          .extracting(file -> file.location().toString())
+          .containsExactly(deleteWriter.toDeleteFile().location().toString());
     }
   }
 
