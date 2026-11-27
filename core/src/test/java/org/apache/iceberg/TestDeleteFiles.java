@@ -97,6 +97,64 @@ public class TestDeleteFiles extends TestBase {
   }
 
   @TestTemplate
+  public void testDeleteByNestedNaNWithIncompleteMetrics() {
+    Schema schema =
+        new Schema(
+            Types.NestedField.optional(
+                1,
+                "parent",
+                Types.StructType.of(
+                    Types.NestedField.required(2, "value", Types.DoubleType.get()))));
+    PartitionSpec spec = PartitionSpec.unpartitioned();
+    Table nestedTable = TestTables.create(tableDir, "nested-nan", schema, spec, formatVersion);
+
+    // One row has a null parent; legacy ORC metrics count only the present child.
+    DataFile mixed =
+        DataFiles.builder(spec)
+            .withPath("/path/to/mixed.orc")
+            .withFileSizeInBytes(10)
+            .withMetrics(
+                new Metrics(
+                    2L,
+                    null,
+                    ImmutableMap.of(2, 1L),
+                    ImmutableMap.of(2, 0L),
+                    ImmutableMap.of(2, 1L),
+                    null,
+                    null))
+            .build();
+
+    DataFile allNaNs =
+        DataFiles.builder(spec)
+            .copy(mixed)
+            .withPath("/path/to/all-nans.orc")
+            .withMetrics(
+                new Metrics(
+                    2L,
+                    null,
+                    ImmutableMap.of(2, 2L),
+                    ImmutableMap.of(2, 0L),
+                    ImmutableMap.of(2, 2L),
+                    null,
+                    null))
+            .build();
+
+    Expression predicate = Expressions.isNaN("parent.value");
+    commit(nestedTable, nestedTable.newAppend().appendFile(allNaNs), branch);
+    Snapshot delete =
+        commit(nestedTable, nestedTable.newDelete().deleteFromRowFilter(predicate), branch);
+    assertThat(delete.summary()).containsEntry(SnapshotSummary.DELETED_FILES_PROP, "1");
+
+    Snapshot append = commit(nestedTable, nestedTable.newAppend().appendFile(mixed), branch);
+    assertThatThrownBy(
+            () ->
+                commit(nestedTable, nestedTable.newDelete().deleteFromRowFilter(predicate), branch))
+        .isInstanceOf(ValidationException.class)
+        .hasMessageContaining("Cannot delete file where some, but not all, rows match filter");
+    assertThat(latestSnapshot(nestedTable, branch).snapshotId()).isEqualTo(append.snapshotId());
+  }
+
+  @TestTemplate
   public void testMultipleDeletes() {
     commit(
         table, table.newAppend().appendFile(FILE_A).appendFile(FILE_B).appendFile(FILE_C), branch);

@@ -291,6 +291,64 @@ public class TestStrictMetricsEvaluator {
   }
 
   @Test
+  public void testIsNaNOnFieldUnderNullStruct() {
+    Schema schema =
+        new Schema(
+            optional(
+                1,
+                "parent",
+                Types.StructType.of(
+                    required(2, "required_child", Types.FloatType.get()),
+                    optional(3, "optional_child", Types.DoubleType.get()))));
+
+    // Legacy ORC metrics count only children under present structs. The other row has a null
+    // parent and does not match isNaN, even though all counted children are NaN.
+    DataFile file =
+        new TestDataFile(
+            "legacy.orc",
+            Row.of(),
+            2L,
+            ImmutableMap.of(2, 1L, 3, 1L),
+            ImmutableMap.of(2, 0L, 3, 0L),
+            ImmutableMap.of(2, 1L, 3, 1L),
+            null,
+            null);
+
+    DataFile allNaNs =
+        new TestDataFile(
+            "all-nans.orc",
+            Row.of(),
+            2L,
+            ImmutableMap.of(2, 2L, 3, 2L),
+            ImmutableMap.of(2, 0L, 3, 0L),
+            ImmutableMap.of(2, 2L, 3, 2L),
+            null,
+            null);
+    DataFile missingNaNCounts =
+        new TestDataFile(
+            "missing-nans.orc",
+            Row.of(),
+            2L,
+            ImmutableMap.of(2, 2L, 3, 2L),
+            ImmutableMap.of(2, 0L, 3, 0L),
+            ImmutableMap.of(),
+            null,
+            null);
+
+    for (String column : new String[] {"parent.required_child", "parent.optional_child"}) {
+      Expression predicate = isNaN(column);
+      Evaluator evaluator = new Evaluator(schema.asStruct(), predicate);
+      assertThat(evaluator.eval(Row.of(Row.of(Float.NaN, Double.NaN)))).isTrue();
+      assertThat(evaluator.eval(Row.of((Object) null))).isFalse();
+
+      StrictMetricsEvaluator strict = new StrictMetricsEvaluator(schema, predicate);
+      assertThat(strict.eval(file)).isFalse();
+      assertThat(strict.eval(allNaNs)).isTrue();
+      assertThat(strict.eval(missingNaNCounts)).isFalse();
+    }
+  }
+
+  @Test
   public void testNotNaN() {
     boolean shouldRead = new StrictMetricsEvaluator(SCHEMA, notNaN("all_nans")).eval(FILE);
     assertThat(shouldRead).as("Should not match: all values are nan").isFalse();

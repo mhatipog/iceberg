@@ -69,6 +69,7 @@ public class StrictMetricsEvaluator {
   }
 
   private class MetricsEvalVisitor extends StrictEvalVisitor {
+    private long recordCount;
     private Map<Integer, Long> valueCounts = null;
     private Map<Integer, Long> nullCounts = null;
     private Map<Integer, Long> nanCounts = null;
@@ -84,6 +85,7 @@ public class StrictMetricsEvaluator {
         return ROWS_MUST_MATCH;
       }
 
+      this.recordCount = file.recordCount();
       this.valueCounts = file.valueCounts();
       this.nullCounts = file.nullValueCounts();
       this.nanCounts = file.nanValueCounts();
@@ -119,8 +121,11 @@ public class StrictMetricsEvaluator {
 
     @Override
     protected boolean containsNaNsOnly(int id) {
+      // Legacy ORC metrics can omit null ancestor structs from nested value counts.
+      // All counted values being NaN is insufficient unless they cover every row.
       return nanCounts != null
           && nanCounts.containsKey(id)
+          && (struct.field(id) != null || nanCounts.get(id) == recordCount)
           && valueCounts != null
           && nanCounts.get(id).equals(valueCounts.get(id));
     }
