@@ -252,8 +252,18 @@ public abstract class DeleteFileIndexTestBase<
       Metrics completeDelete = nestedMetrics(id, 2L, 1L, 9);
       Metrics nonNullData = nestedMetrics(id, 2L, 0L, 7);
       Metrics nonNullDelete = nestedMetrics(id, 2L, 0L, 9);
+      Metrics missingValueCountData = nestedMetrics(id, null, 0L, 7);
+      Metrics missingValueCountDelete = nestedMetrics(id, null, 0L, 9);
+      Metrics missingNullCountData = nestedMetrics(id, 2L, null, 7);
+      Metrics missingNullCountDelete = nestedMetrics(id, 2L, null, 9);
 
-      for (Metrics deleteMetrics : List.of(legacyDelete, completeDelete, nonNullDelete)) {
+      for (Metrics deleteMetrics :
+          List.of(
+              legacyDelete,
+              completeDelete,
+              nonNullDelete,
+              missingValueCountDelete,
+              missingNullCountDelete)) {
         DeleteFile deletes =
             withDataSequenceNumber(
                 2,
@@ -270,7 +280,13 @@ public abstract class DeleteFileIndexTestBase<
                 .schemasById(Map.of(schema.schemaId(), schema))
                 .build();
 
-        for (Metrics dataMetrics : List.of(legacyData, completeData, nonNullData)) {
+        for (Metrics dataMetrics :
+            List.of(
+                legacyData,
+                completeData,
+                nonNullData,
+                missingValueCountData,
+                missingNullCountData)) {
           DataFile data =
               DataFiles.builder(spec)
                   .withPath("/path/to/nested-data.orc")
@@ -288,11 +304,17 @@ public abstract class DeleteFileIndexTestBase<
     }
   }
 
-  private static Metrics nestedMetrics(int id, long valueCount, long nullCount, int value) {
+  private static Metrics nestedMetrics(int id, Long valueCount, Long nullCount, int value) {
     Map<Integer, ByteBuffer> bounds =
         Map.of(id, Conversions.toByteBuffer(Types.IntegerType.get(), value));
     return new Metrics(
-        2L, null, Map.of(id, valueCount), Map.of(id, nullCount), null, bounds, bounds);
+        2L,
+        null,
+        valueCount != null ? Map.of(id, valueCount) : null,
+        nullCount != null ? Map.of(id, nullCount) : null,
+        null,
+        bounds,
+        bounds);
   }
 
   @TestTemplate
