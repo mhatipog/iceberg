@@ -239,8 +239,10 @@ public abstract class DeleteFileIndexTestBase<
                         2,
                         "inner",
                         Types.StructType.of(
-                            Types.NestedField.required(3, "required_child", Types.IntegerType.get()),
-                            Types.NestedField.optional(4, "optional_child", Types.IntegerType.get()))))));
+                            Types.NestedField.required(
+                                3, "required_child", Types.IntegerType.get()),
+                            Types.NestedField.optional(
+                                4, "optional_child", Types.IntegerType.get()))))));
     PartitionSpec spec = PartitionSpec.builderFor(schema).build();
 
     for (int id : List.of(3, 4)) {
