@@ -3,6 +3,11 @@ on:
   push:
     branches:
       - validation/equality-deletes-null-struct-ancestors
+  pull_request:
+    branches:
+      - fix/equality-deletes-null-struct-ancestors
+    paths:
+      - '.github/workflows/nested-equality-delete-validation.yml'
 permissions:
   contents: read
 jobs:
