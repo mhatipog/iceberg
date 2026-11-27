@@ -92,7 +92,8 @@ public class TestGenericReaderDeletes extends DeleteReadTests {
         GenericRecord.create(nested.schema().findType("parent").asStructType());
     DataWriter<Record> dataWriter =
         factory.newDataWriter(
-            nested.encryption().encrypt(Files.localOutput(temp.resolve("nested-data").toFile())),
+            nested.encryption().encrypt(
+                Files.localOutput(temp.resolve(format.addExtension("nested-data")).toFile())),
             nested.spec(),
             null);
     try (dataWriter) {
@@ -105,7 +106,8 @@ public class TestGenericReaderDeletes extends DeleteReadTests {
     GenericRecord delete = GenericRecord.create(deleteSchema);
     EqualityDeleteWriter<Record> deleteWriter =
         factory.newEqualityDeleteWriter(
-            nested.encryption().encrypt(Files.localOutput(temp.resolve("nested-delete").toFile())),
+            nested.encryption().encrypt(
+                Files.localOutput(temp.resolve(format.addExtension("nested-delete")).toFile())),
             nested.spec(),
             null);
     try (deleteWriter) {
