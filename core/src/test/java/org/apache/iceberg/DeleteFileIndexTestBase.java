@@ -40,6 +40,7 @@ import org.apache.iceberg.relocated.com.google.common.collect.ImmutableMap;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
 import org.apache.iceberg.relocated.com.google.common.collect.Sets;
+import org.apache.iceberg.types.Conversions;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.CharSequenceSet;
 import org.apache.iceberg.util.ContentFileUtil;
@@ -224,6 +225,74 @@ public abstract class DeleteFileIndexTestBase<
               .build();
       assertThat(index.forDataFile(0, healthy)).isEmpty();
     }
+  }
+
+  @TestTemplate
+  public void testEqualityDeletesWithDisjointBoundsUnderOptionalStruct() {
+    Schema schema =
+        new Schema(
+            Types.NestedField.optional(
+                1,
+                "parent",
+                Types.StructType.of(
+                    Types.NestedField.required(
+                        2,
+                        "inner",
+                        Types.StructType.of(
+                            Types.NestedField.required(3, "required_child", Types.IntegerType.get()),
+                            Types.NestedField.optional(4, "optional_child", Types.IntegerType.get()))))));
+    PartitionSpec spec = PartitionSpec.builderFor(schema).build();
+
+    for (int id : List.of(3, 4)) {
+      // Both files contain a null ancestor, but their non-null values do not overlap.
+      // Test legacy counts on either side as well as complete counts on both sides.
+      Metrics legacyData = nestedMetrics(id, 1L, 0L, 7);
+      Metrics completeData = nestedMetrics(id, 2L, 1L, 7);
+      Metrics legacyDelete = nestedMetrics(id, 1L, 0L, 9);
+      Metrics completeDelete = nestedMetrics(id, 2L, 1L, 9);
+      Metrics nonNullData = nestedMetrics(id, 2L, 0L, 7);
+      Metrics nonNullDelete = nestedMetrics(id, 2L, 0L, 9);
+
+      for (Metrics deleteMetrics : List.of(legacyDelete, completeDelete, nonNullDelete)) {
+        DeleteFile deletes =
+            withDataSequenceNumber(
+                2,
+                FileMetadata.deleteFileBuilder(spec)
+                    .ofEqualityDeletes(id)
+                    .withPath("/path/to/nested-delete.orc")
+                    .withFileSizeInBytes(10)
+                    .withMetrics(deleteMetrics)
+                    .build());
+
+        DeleteFileIndex index =
+            DeleteFileIndex.builderFor(List.of(deletes))
+                .specsById(Map.of(spec.specId(), spec))
+                .schemasById(Map.of(schema.schemaId(), schema))
+                .build();
+
+        for (Metrics dataMetrics : List.of(legacyData, completeData, nonNullData)) {
+          DataFile data =
+              DataFiles.builder(spec)
+                  .withPath("/path/to/nested-data.orc")
+                  .withFileSizeInBytes(10)
+                  .withMetrics(dataMetrics)
+                  .build();
+
+          if (deleteMetrics == nonNullDelete || dataMetrics == nonNullData) {
+            assertThat(index.forDataFile(0, data)).isEmpty();
+          } else {
+            assertThat(index.forDataFile(0, data)).containsExactly(deletes);
+          }
+        }
+      }
+    }
+  }
+
+  private static Metrics nestedMetrics(int id, long valueCount, long nullCount, int value) {
+    Map<Integer, ByteBuffer> bounds =
+        Map.of(id, Conversions.toByteBuffer(Types.IntegerType.get(), value));
+    return new Metrics(
+        2L, null, Map.of(id, valueCount), Map.of(id, nullCount), null, bounds, bounds);
   }
 
   @TestTemplate
