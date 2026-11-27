@@ -18,17 +18,23 @@
  */
 package org.apache.iceberg.data;
 
+import static org.assertj.core.api.Assertions.assertThat;
+
 import java.io.File;
 import java.io.IOException;
+import org.apache.iceberg.Files;
 import org.apache.iceberg.ParameterizedTestExtension;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TestTables;
+import org.apache.iceberg.deletes.EqualityDeleteWriter;
 import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.io.DataWriter;
 import org.apache.iceberg.relocated.com.google.common.collect.Iterables;
 import org.apache.iceberg.types.Types;
 import org.apache.iceberg.util.StructLikeSet;
+import org.junit.jupiter.api.TestTemplate;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -57,6 +63,62 @@ public class TestGenericReaderDeletes extends DeleteReadTests {
               reader, record -> new InternalRecordWrapper(schema).wrap(record)));
     }
     return set;
+  }
+
+  @TestTemplate
+  public void testNestedEqualityDeleteWithNullAncestor() throws IOException {
+    Schema schema =
+        new Schema(
+            Types.NestedField.required(1, "id", Types.IntegerType.get()),
+            Types.NestedField.optional(
+                2,
+                "parent",
+                Types.StructType.of(
+                    Types.NestedField.required(3, "child", Types.IntegerType.get()))));
+    Table nested = createTable("test2", schema, PartitionSpec.unpartitioned());
+    Schema deleteSchema = nested.schema().select("parent.child");
+    int equalityId = nested.schema().findField("parent.child").fieldId();
+
+    GenericFileWriterFactory factory =
+        GenericFileWriterFactory.builderFor(nested)
+            .dataFileFormat(format)
+            .deleteFileFormat(format)
+            .equalityDeleteRowSchema(deleteSchema)
+            .equalityFieldIds(new int[] {equalityId})
+            .build();
+
+    GenericRecord data = GenericRecord.create(nested.schema());
+    GenericRecord child =
+        GenericRecord.create(nested.schema().findType("parent").asStructType());
+    DataWriter<Record> dataWriter =
+        factory.newDataWriter(
+            nested.encryption().encrypt(Files.localOutput(temp.resolve("nested-data").toFile())),
+            nested.spec(),
+            null);
+    try (dataWriter) {
+      dataWriter.write(data.copy("id", 1, "parent", null));
+      dataWriter.write(data.copy("id", 2, "parent", child.copy("child", 7)));
+    }
+
+    nested.newAppend().appendFile(dataWriter.toDataFile()).commit();
+
+    GenericRecord delete = GenericRecord.create(deleteSchema);
+    EqualityDeleteWriter<Record> deleteWriter =
+        factory.newEqualityDeleteWriter(
+            nested.encryption().encrypt(Files.localOutput(temp.resolve("nested-delete").toFile())),
+            nested.spec(),
+            null);
+    try (deleteWriter) {
+      deleteWriter.write(delete.copy("parent", null));
+      deleteWriter.write(delete.copy("parent", child.copy("child", 9)));
+    }
+
+    nested.newRowDelta().addDeletes(deleteWriter.toDeleteFile()).commit();
+
+    // The non-null child values have disjoint bounds, but the null parent must match.
+    try (CloseableIterable<Record> rows = IcebergGenerics.read(nested).select("id").build()) {
+      assertThat(Iterables.transform(rows, row -> row.getField("id"))).containsExactly(2);
+    }
   }
 
   @Override
