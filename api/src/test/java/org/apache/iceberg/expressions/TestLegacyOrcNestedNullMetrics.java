@@ -18,6 +18,7 @@
  */
 package org.apache.iceberg.expressions;
 
+import static org.apache.iceberg.expressions.Expressions.equal;
 import static org.apache.iceberg.expressions.Expressions.isNull;
 import static org.apache.iceberg.expressions.Expressions.notEqual;
 import static org.apache.iceberg.expressions.Expressions.notIn;
@@ -75,7 +76,7 @@ public class TestLegacyOrcNestedNullMetrics {
     assertThat(mayMatch(legacy, isNull("parent.leaf"))).isTrue();
     assertThat(mayMatch(legacy, isNull("parent.inner.leaf"))).isTrue();
     assertThat(mayMatch(legacy, notEqual("parent.leaf", 10))).isTrue();
-    assertThat(mayMatch(legacy, notIn("parent.leaf", 10))).isTrue();
+    assertThat(mayMatch(legacy, notIn("parent.leaf", 10, 20))).isTrue();
   }
 
   @Test
@@ -84,12 +85,13 @@ public class TestLegacyOrcNestedNullMetrics {
     DataFile healthy = file("healthy.orc", 2L);
     assertThat(mayMatch(healthy, isNull("parent.leaf"))).isFalse();
     assertThat(mayMatch(healthy, notEqual("parent.leaf", 10))).isFalse();
-    assertThat(mayMatch(healthy, notIn("parent.leaf", 10))).isFalse();
+    assertThat(mayMatch(healthy, notIn("parent.leaf", 10, 20))).isFalse();
 
     DataFile legacyParquet = file("file.parquet", 1L);
     assertThat(mayMatch(legacyParquet, isNull("parent.leaf"))).isFalse();
 
     DataFile legacy = file("legacy.orc", 1L);
+    assertThat(mayMatch(legacy, equal("parent.leaf", 9))).isFalse();
     assertThat(mayMatch(legacy, isNull("stable.leaf"))).isFalse();
     assertThat(mayMatch(legacy, isNull("simple"))).isFalse();
   }
